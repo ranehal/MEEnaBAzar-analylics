@@ -1,0 +1,15 @@
+# Dependencies
+node_modules/
+frontend/node_modules/
+.venv/
+venv/
+
+# Python cache & logs
+__pycache__/
+*.pyc
+*.log
+backend/__pycache__/
+
+# OS files
+.DS_Store
+Thumbs.db
