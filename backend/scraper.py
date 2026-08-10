@@ -1,13 +1,60 @@
 import asyncio
 import json
+import os
+import platform
+import random
 import re
+import subprocess
 import sys
+import traceback
 from playwright.async_api import async_playwright
 from datetime import datetime, timezone
 from database import async_session, Category, Product, PriceHistory, init_db
 from sqlalchemy.future import select
 
 BASE_URL = "https://meenabazaronline.com"
+
+PARALLEL_CATEGORIES = 4
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+]
+
+
+def ensure_playwright_browser():
+    """Verify the Chromium binary exists; auto-install it if missing.
+
+    On Kaggle a disk-full (Errno 28) or missing browser silently breaks
+    browser.launch(), which surfaces as a bare asyncio/Connection.run()
+    crash. This makes the problem visible and self-healing instead.
+    """
+    try:
+        dry = subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "--dry-run", "chromium"],
+            capture_output=True, text=True, timeout=120
+        )
+        out = ((dry.stdout or "") + (dry.stderr or "")).lower()
+        if "already installed" in out:
+            print("[Preflight] Chromium browser verified OK.")
+            return
+        print("[Preflight] Chromium browser missing. Installing...")
+    except Exception as e:
+        print(f"[Preflight] Chromium probe failed ({e}); attempting install anyway.")
+
+    cmd = [sys.executable, "-m", "playwright", "install", "chromium", "--with-deps"]
+    if platform.system() != "Linux":
+        cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
+    for attempt in range(2):
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        if r.returncode == 0:
+            print("[Preflight] Chromium browser installed.")
+            return
+        cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
+        print(f"[Preflight] Chromium install failed: {(r.stderr or r.stdout or '')[:300]}")
+    print("[Preflight] CRITICAL: Chromium install failed. Browser launch will crash.")
+    print("[Preflight] Check disk space (df -h /kaggle/working) and network access.")
 
 async def scrape_categories(page):
     """Return hardcoded categories as requested by the user."""
@@ -31,7 +78,7 @@ async def scrape_categories(page):
 async def scrape_products_in_category(page, category_url):
     print(f"\n[Scraping Category] {category_url}")
     try:
-        await page.goto(category_url, wait_until="networkidle", timeout=60000)
+        await page.goto(category_url, wait_until="domcontentloaded", timeout=60000)
         
         # Handle Delivery Area Modal if it appears
         try:
@@ -186,17 +233,65 @@ async def main():
     await init_db()
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page()
-        
-        categories = await scrape_categories(page)
-        
-        # Scrape all hardcoded categories
-        for cat in categories: 
-            all_products = await scrape_products_in_category(page, cat['url'])
-            print(f"\n[Summary] Scraped {len(all_products)} products from {cat['name']}")
-            await save_to_db(cat, all_products)
-                
+
+        # One page per concurrent category (bounded, not too aggressive on the site)
+        pages = [
+            await browser.new_page(
+                user_agent=random.choice(USER_AGENTS),
+                extra_http_headers={'Accept-Language': 'en-US,en;q=0.9'}
+            )
+            for _ in range(PARALLEL_CATEGORIES)
+        ]
+
+        categories = await scrape_categories(pages[0])
+
+        # Scrape all hardcoded categories in parallel
+        sem = asyncio.Semaphore(PARALLEL_CATEGORIES)
+        total_products = 0
+        cats_with_products = 0
+
+        async def scrape_one(idx, cat):
+            nonlocal total_products, cats_with_products
+            async with sem:
+                try:
+                    page = pages[idx % len(pages)]
+                    all_products = await scrape_products_in_category(page, cat['url'])
+                    if all_products:
+                        await save_to_db(cat, all_products)
+                    total_products += len(all_products)
+                    if all_products:
+                        cats_with_products += 1
+                    print(f"\n[Summary] Scraped {len(all_products)} products from {cat['name']}")
+                except Exception as cat_err:
+                    print(f"[Category Error] {cat['name']}: {cat_err}")
+
+        await asyncio.gather(*[scrape_one(idx, cat) for idx, cat in enumerate(categories)])
+
+        print(f"\n=== MEENA BAZAR SCRAPE COMPLETE ===")
+        print(f"Total Categories: {len(categories)} ({cats_with_products} active with products)")
+        print(f"Total Products Scraped: {total_products}")
+
+        for page in pages:
+            await page.close()
         await browser.close()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    ensure_playwright_browser()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Interrupted by user.")
+    except SystemExit:
+        raise
+    except Exception:
+        full_tb = traceback.format_exc()
+        print("FATAL ERROR (full traceback saved to scraper_error.log):")
+        print(full_tb)
+        try:
+            log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scraper_error.log")
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write(f"{datetime.now(timezone.utc).isoformat()}\n{full_tb}")
+            print(f"Traceback written to {log_path}")
+        except Exception:
+            pass
+        sys.exit(1)
