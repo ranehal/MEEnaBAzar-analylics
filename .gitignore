@@ -13,3 +13,6 @@ backend/__pycache__/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Browser tooling artifacts
+.playwright-mcp/

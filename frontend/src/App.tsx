@@ -1,592 +1,557 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { 
-  AreaChart, Area, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend 
-} from 'recharts';
-import { Heart, Search, TrendingUp, TrendingDown, SlidersHorizontal, ArrowUpDown, X, ListPlus } from 'lucide-react';
-import { format, subDays, isAfter } from 'date-fns';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import {
+  Search, TrendingDown, TrendingUp, SlidersHorizontal, ArrowUpDown, X,
+  ListPlus, Bell, BarChart3, Flame, Heart, Activity, Loader2,
+} from 'lucide-react';
+import { getDataset, getProductHistory, toggleFavoriteApi } from './api';
+import type { Dataset, Density, HistoryPoint, Product, WatchItem } from './types';
+import {
+  CURRENCY, fmtChange, fmtPrice, PLACEHOLDER_IMG,
+  loadFavs, saveFavs, loadWatch, saveWatch, loadDensity, saveDensity, loadCompare, saveCompare,
+} from './utils';
+import Ticker from './components/Ticker';
+import Sparkline from './components/Sparkline';
+import MoversPanel from './components/MoversPanel';
+import CategoryHeatmap from './components/CategoryHeatmap';
+import WatchlistPanel from './components/WatchlistPanel';
+import ItemModal from './components/ItemModal';
+import CompareModal from './components/CompareModal';
 import './App.css';
 
-interface Product {
-  id: number;
-  category_id: number;
-  name: string;
-  unit: string;
-  unit_type: string;
-  image_url: string;
-  actual_price: number;
-  unit_price: number;
-  min_price: number;
-  max_price: number;
-  avg_price: number;
-  change: number;
-  is_favorite: boolean;
-}
+const UNIT_TYPES = ['kg', 'ltr', 'piece'];
 
-interface Category {
-  id: number;
-  name: string;
-  is_custom: boolean;
-}
+type SortKey = 'name' | 'unit_price' | 'actual_price' | 'change';
+type SmartFilter = 'all' | 'low' | 'drop' | 'great' | 'wait';
+type Panel = 'movers' | 'heatmap' | null;
 
-const API_BASE = "http://localhost:8000";
+export default function App() {
+  const [dataset, setDataset] = useState<Dataset | null>(null);
+  const [loadError, setLoadError] = useState('');
 
-const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#a855f7', '#ec4899', '#14b8a6'];
-
-function App() {
-  const [categories, setCategories] = useState<Category[]>([]);
-  const [products, setProducts] = useState<Product[]>([]);
-  
-  // Filters and Sort
+  // filters / sort
   const [selectedCategories, setSelectedCategories] = useState<Set<number>>(new Set());
-  const [unitFilters, setUnitFilters] = useState<Set<string>>(new Set(['kg', 'ltr', 'piece']));
+  const [unitFilters, setUnitFilters] = useState<Set<string>>(new Set(UNIT_TYPES));
   const [search, setSearch] = useState('');
-  const [sortBy, setSortBy] = useState<'name' | 'unit_price' | 'actual_price' | 'change'>('name');
+  const [sortBy, setSortBy] = useState<SortKey>('name');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
-  
-  // Smart Filters
-  const [smartFilter, setSmartFilter] = useState<'all'|'low'|'drop'|'great'|'wait'>('all');
+  const [smartFilter, setSmartFilter] = useState<SmartFilter>('all');
 
-  // Modal State
-  const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
-  const [historyData, setHistoryData] = useState<any[]>([]);
-  const [dateRange, setDateRange] = useState<number | 'all'>('all');
+  // personalization
+  const [density, setDensity] = useState<Density>(loadDensity());
+  const [favs, setFavs] = useState<Set<number>>(new Set(loadFavs()));
+  const [watch, setWatch] = useState<WatchItem[]>(loadWatch());
 
-  // Compare Mode State
+  // compare
   const [isCompareMode, setIsCompareMode] = useState(false);
-  const [compareSelected, setCompareSelected] = useState<Product[]>([]);
-  const [showCompareModal, setShowCompareModal] = useState(false);
-  const [compareHistoryData, setCompareHistoryData] = useState<any[]>([]);
+  const [compareIds, setCompareIds] = useState<number[]>(loadCompare());
+  const [showCompare, setShowCompare] = useState(false);
+  const [compareHistories, setCompareHistories] = useState<Map<number, HistoryPoint[]>>(new Map());
+
+  // panels
+  const [openPanel, setOpenPanel] = useState<Panel>(null);
+  const [showWatch, setShowWatch] = useState(false);
+
+  // item modal
+  const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
+  const [selectedHistory, setSelectedHistory] = useState<HistoryPoint[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
 
   useEffect(() => {
-    fetchCategories();
-    fetchProducts();
-    const handleKeyDown = (e: KeyboardEvent) => { 
-      if (e.key === 'Escape') {
-        setSelectedProduct(null);
-        setShowCompareModal(false);
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    getDataset()
+      .then((ds) => {
+        setDataset(ds);
+        setFavs((prev) => {
+          const merged = new Set(prev);
+          ds.products.forEach((p) => {
+            if (p.is_favorite) merged.add(p.id);
+          });
+          return merged;
+        });
+      })
+      .catch((e) => setLoadError(String(e?.message ?? e)));
   }, []);
 
-  const fetchCategories = async () => {
-    try {
-      const res = await fetch(`${API_BASE}/categories`);
-      const data = await res.json();
-      setCategories(data);
-    } catch (e) { console.error(e); }
-  };
-
-  const fetchProducts = async () => {
-    try {
-      const res = await fetch(`${API_BASE}/products`);
-      const data = await res.json();
-      setProducts(data);
-    } catch (e) { console.error(e); }
-  };
-
-  const fetchHistory = async (id: number) => {
-    try {
-      const res = await fetch(`${API_BASE}/products/${id}/history`);
-      const data = await res.json();
-      
-      let graphData = data.map((d: any) => ({
-        ...d,
-        timestamp: new Date(d.scraped_at).getTime(),
-        date: format(new Date(d.scraped_at), 'MMM dd')
-      }));
-      
-      if (graphData.length === 1) {
-         const base = graphData[0];
-         const now = new Date().getTime();
-         graphData = [
-           {...base, timestamp: now - 5*86400000, date: format(now - 5*86400000, 'MMM dd'), unit_price: base.unit_price * 1.1, actual_price: base.actual_price * 1.1},
-           {...base, timestamp: now - 4*86400000, date: format(now - 4*86400000, 'MMM dd'), unit_price: base.unit_price * 1.05, actual_price: base.actual_price * 1.05},
-           {...base, timestamp: now - 3*86400000, date: format(now - 3*86400000, 'MMM dd'), unit_price: base.unit_price * 1.15, actual_price: base.actual_price * 1.15},
-           {...base, timestamp: now - 2*86400000, date: format(now - 2*86400000, 'MMM dd'), unit_price: base.unit_price * 0.95, actual_price: base.actual_price * 0.95},
-           {...base, timestamp: now - 1*86400000, date: format(now - 1*86400000, 'MMM dd'), unit_price: base.unit_price * 0.9, actual_price: base.actual_price * 0.9},
-           base
-         ];
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setSelectedProduct(null);
+        setShowCompare(false);
+        setShowWatch(false);
+        setOpenPanel(null);
       }
-      return graphData;
-    } catch (e) { console.error(e); return []; }
-  };
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
-  const handleProductClick = async (product: Product) => {
-    if (isCompareMode) {
-      if (compareSelected.find(p => p.id === product.id)) {
-        setCompareSelected(prev => prev.filter(p => p.id !== product.id));
-      } else if (compareSelected.length < 5) {
-        setCompareSelected(prev => [...prev, product]);
-      }
-      return;
-    }
-    
-    setSelectedProduct(product);
-    setHistoryData([]); 
-    setDateRange('all');
-    const data = await fetchHistory(product.id);
-    setHistoryData(data);
-  };
+  const products = useMemo(() => dataset?.products ?? [], [dataset]);
+  const categories = useMemo(() => dataset?.categories ?? [], [dataset]);
 
-  const launchCompareModal = async () => {
-     setShowCompareModal(true);
-     setDateRange('all');
-     setCompareHistoryData([]);
+  const toggleFav = useCallback(
+    async (e: React.MouseEvent, id: number) => {
+      e.stopPropagation();
+      setFavs((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        saveFavs([...next]);
+        return next;
+      });
+      await toggleFavoriteApi(id);
+    },
+    [],
+  );
 
-     // Fetch all histories in parallel
-     const histories = await Promise.all(compareSelected.map(p => fetchHistory(p.id)));
-     
-     // Merge histories by date for Recharts
-     const mergedMap = new Map();
-     histories.forEach((hist, idx) => {
-         const pId = compareSelected[idx].id;
-         hist.forEach((point: any) => {
-             const existing = mergedMap.get(point.date) || { date: point.date, timestamp: point.timestamp };
-             existing[`price_${pId}`] = point.unit_price;
-             mergedMap.set(point.date, existing);
-         });
-     });
-     
-     const mergedList = Array.from(mergedMap.values()).sort((a, b) => a.timestamp - b.timestamp);
-     setCompareHistoryData(mergedList);
-  };
+  const setWatchItem = useCallback((productId: number, targetPrice: number) => {
+    setWatch((prev) => {
+      const next = prev.filter((w) => w.productId !== productId);
+      next.push({ productId, targetPrice, addedAt: Date.now() });
+      saveWatch(next);
+      return next;
+    });
+  }, []);
 
-  const toggleFavorite = async (e: React.MouseEvent, id: number) => {
-    e.stopPropagation();
-    try {
-      await fetch(`${API_BASE}/products/${id}/favorite`, { method: 'POST' });
-      setProducts(prev => prev.map(p => p.id === id ? { ...p, is_favorite: !p.is_favorite } : p));
-    } catch (e) { console.error(e); }
+  const removeWatch = useCallback((productId: number) => {
+    setWatch((prev) => {
+      const next = prev.filter((w) => w.productId !== productId);
+      saveWatch(next);
+      return next;
+    });
+  }, []);
+
+  const setDensityPersist = (d: Density) => {
+    setDensity(d);
+    saveDensity(d);
   };
 
   const toggleCategory = (id: number) => {
-    const newSet = new Set(selectedCategories);
-    if (newSet.has(id)) newSet.delete(id);
-    else newSet.add(id);
-    setSelectedCategories(newSet);
+    setSelectedCategories((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   };
 
   const toggleUnit = (unit: string) => {
-    const newSet = new Set(unitFilters);
-    if (newSet.has(unit)) newSet.delete(unit);
-    else newSet.add(unit);
-    setUnitFilters(newSet);
+    setUnitFilters((prev) => {
+      const next = new Set(prev);
+      if (next.has(unit)) next.delete(unit);
+      else next.add(unit);
+      return next;
+    });
   };
 
-  const filteredAndSortedProducts = useMemo(() => {
-    let result = products.filter(p => {
-      const matchesSearch = p.name.toLowerCase().includes(search.toLowerCase());
-      
+  const openProduct = async (p: Product) => {
+    setSelectedProduct(p);
+    setSelectedHistory([]);
+    if (!dataset) return;
+    setHistoryLoading(true);
+    const hist = await getProductHistory(p.id, dataset, p);
+    setSelectedHistory(hist);
+    setHistoryLoading(false);
+  };
+
+  const launchCompare = async () => {
+    setShowCompare(true);
+    if (!dataset) return;
+    const histMap = new Map<number, HistoryPoint[]>();
+    await Promise.all(
+      compareIds.map(async (id) => {
+        const p = products.find((x) => x.id === id);
+        histMap.set(id, await getProductHistory(id, dataset, p));
+      }),
+    );
+    setCompareHistories(histMap);
+  };
+
+  const toggleCompareSelect = (p: Product) => {
+    setCompareIds((prev) => {
+      let next: number[];
+      if (prev.includes(p.id)) next = prev.filter((x) => x !== p.id);
+      else if (prev.length < 5) next = [...prev, p.id];
+      else return prev;
+      saveCompare(next);
+      return next;
+    });
+  };
+
+  const filtered = useMemo(() => {
+    let result = products.filter((p) => {
+      if (search && !p.name.toLowerCase().includes(search.toLowerCase())) return false;
+
       let matchesCat = true;
       if (selectedCategories.size > 0) {
-         if (selectedCategories.has(-1) && selectedCategories.size === 1) {
-            matchesCat = p.is_favorite;
-         } else if (selectedCategories.has(-1)) {
-            matchesCat = p.is_favorite || selectedCategories.has(p.category_id);
-         } else {
-            matchesCat = selectedCategories.has(p.category_id);
-         }
+        if (selectedCategories.has(-1) && selectedCategories.size === 1) {
+          matchesCat = favs.has(p.id);
+        } else if (selectedCategories.has(-1)) {
+          matchesCat = favs.has(p.id) || selectedCategories.has(p.category_id);
+        } else {
+          matchesCat = selectedCategories.has(p.category_id);
+        }
       }
-      
-      const matchesUnit = unitFilters.has(p.unit_type);
-      
-      let matchesSmart = true;
-      if (smartFilter === 'low') matchesSmart = p.unit_price <= p.min_price;
-      if (smartFilter === 'drop') matchesSmart = p.change < 0;
-      if (smartFilter === 'great') matchesSmart = p.unit_price < (p.avg_price * 0.9);
-      if (smartFilter === 'wait') matchesSmart = p.unit_price > p.avg_price;
+      if (!matchesCat) return false;
+      if (!unitFilters.has(p.unit_type)) return false;
 
-      return matchesSearch && matchesCat && matchesUnit && matchesSmart;
+      if (smartFilter === 'low') return p.unit_price <= p.min_price;
+      if (smartFilter === 'drop') return p.change < 0;
+      if (smartFilter === 'great') return p.unit_price < p.avg_price * 0.9;
+      if (smartFilter === 'wait') return p.unit_price > p.avg_price;
+      return true;
     });
 
-    result.sort((a, b) => {
-      let valA = a[sortBy];
-      let valB = b[sortBy];
-      if (typeof valA === 'string') valA = valA.toLowerCase();
-      if (typeof valB === 'string') valB = valB.toLowerCase();
-      
-      if (valA < valB) return sortOrder === 'asc' ? -1 : 1;
-      if (valA > valB) return sortOrder === 'asc' ? 1 : -1;
-      return 0;
+    result = [...result].sort((a, b) => {
+      let va: string | number = a[sortBy];
+      let vb: string | number = b[sortBy];
+      if (typeof va === 'string') va = va.toLowerCase();
+      if (typeof vb === 'string') vb = vb.toLowerCase();
+      const cmp = va < vb ? -1 : va > vb ? 1 : 0;
+      return sortOrder === 'asc' ? cmp : -cmp;
     });
 
     return result;
-  }, [products, search, selectedCategories, unitFilters, sortBy, sortOrder, smartFilter]);
+  }, [products, search, selectedCategories, unitFilters, smartFilter, sortBy, sortOrder, favs]);
 
-  // Handle Date Range Filtering for Modal
-  const filteredHistoryData = useMemo(() => {
-    if (!historyData.length) return [];
-    if (dateRange === 'all') return historyData;
-    const cutoff = subDays(new Date(), dateRange);
-    return historyData.filter(d => isAfter(d.timestamp, cutoff));
-  }, [historyData, dateRange]);
+  const overview = useMemo(() => {
+    const atLow = products.filter((p) => p.unit_price <= p.min_price).length;
+    const changes = products.filter((p) => isFinite(p.change)).map((p) => p.change);
+    const avgChange = changes.length
+      ? changes.reduce((a, b) => a + b, 0) / changes.length
+      : 0;
+    const hitAlerts = watch.filter((w) => {
+      const p = products.find((x) => x.id === w.productId);
+      return p && p.unit_price <= w.targetPrice;
+    }).length;
+    return { atLow, avgChange, hitAlerts };
+  }, [products, watch]);
 
-  const stats = useMemo(() => {
-    if (!filteredHistoryData.length) return null;
-    const prices = filteredHistoryData.map(d => d.unit_price);
-    const max = Math.max(...prices);
-    const min = Math.min(...prices);
-    const avg = prices.reduce((a,b) => a+b, 0) / prices.length;
-    const current = prices[prices.length - 1];
-    const prev = prices.length > 1 ? prices[prices.length - 2] : current;
-    const change = prev ? ((current - prev) / prev) * 100 : 0;
-    
-    let suggestion = 'GOOD SAVING';
-    let sugClass = 'sug-great';
-    if (current <= min) { suggestion = 'ALL TIME LOW'; sugClass = 'sug-great'; }
-    else if (current > avg) { suggestion = 'WAIT FOR DROP'; sugClass = 'sug-wait'; }
-    else if (current > max * 0.9) { suggestion = 'BAD TIME TO BUY'; sugClass = 'sug-bad'; }
+  const compareProducts = useMemo(
+    () => compareIds.map((id) => products.find((p) => p.id === id)).filter(Boolean) as Product[],
+    [compareIds, products],
+  );
 
-    return { max, min, avg, change, suggestion, sugClass, current };
-  }, [filteredHistoryData]);
+  const watchMap = useMemo(() => {
+    const m = new Map<number, number>();
+    watch.forEach((w) => m.set(w.productId, w.targetPrice));
+    return m;
+  }, [watch]);
 
-  const productNames = useMemo(() => {
-      return Array.from(new Set(products.map(p => p.name)));
-  }, [products]);
+  if (loadError) {
+    return (
+      <div className="boot-screen">
+        <div className="boot-card">
+          <h1>MEENAtracker</h1>
+          <p className="boot-err">Could not load data.</p>
+          <p className="boot-sub">{loadError}</p>
+          <p className="boot-hint">
+            Start the backend (<code>uvicorn main:app</code> on :8000) or build with the static
+            snapshot in <code>frontend/public/data/</code>.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
-  const getCategoryCount = (id: number) => {
-      if (id === -1) return products.filter(p => p.is_favorite).length;
-      return products.filter(p => p.category_id === id).length;
+  if (!dataset) {
+    return (
+      <div className="boot-screen">
+        <div className="boot-card">
+          <h1>MEENAtracker</h1>
+          <Loader2 className="spin" size={26} />
+          <p className="boot-sub">Loading market snapshot…</p>
+        </div>
+      </div>
+    );
+  }
+
+  const catCount = (id: number) => {
+    if (id === -1) return products.filter((p) => favs.has(p.id)).length;
+    return dataset.category_counts[String(id)] ?? products.filter((p) => p.category_id === id).length;
   };
 
   return (
-    <div className="app-container">
+    <div className="app-container" data-density={density}>
       <aside className="sidebar">
         <div className="sidebar-header">
-          <h2>MEENAtracker</h2>
+          <h1 className="brand">MEENA<span>tracker</span></h1>
+          <p className="brand-sub">bazaar market terminal</p>
         </div>
+
+        <div className="mode-badge">
+          <span className={`mode-dot ${dataset.mode}`} />
+          {dataset.mode === 'live' ? 'LIVE API' : 'STATIC SNAPSHOT'}
+          {dataset.generated_at && (
+            <span className="mode-date">· {new Date(dataset.generated_at).toLocaleDateString()}</span>
+          )}
+        </div>
+
         <div className="sidebar-content">
           <div className="sidebar-section-title">Categories</div>
-          <div 
+          <div
             className={`category-item ${selectedCategories.size === 0 ? 'active' : ''}`}
             onClick={() => setSelectedCategories(new Set())}
           >
-            <div style={{display: 'flex', alignItems: 'center', gap: '0.75rem'}}>
-               <div style={{width: 16, height: 16, border: '1px solid var(--text-dim)', borderRadius: 3, background: selectedCategories.size === 0 ? 'var(--primary)' : 'transparent'}} />
-               <span>Select All</span>
-            </div>
+            <div className="cat-check all" />
+            <span>Select All</span>
             <span className="cat-count">{products.length}</span>
           </div>
-          
-          <div 
-            className={`category-item ${selectedCategories.has(-1) ? 'active' : ''}`}
+          <div
+            className={`category-item fav ${selectedCategories.has(-1) ? 'active' : ''}`}
             onClick={() => toggleCategory(-1)}
-            style={{color: 'var(--danger)', fontWeight: 600}}
           >
-            <div style={{display: 'flex', alignItems: 'center', gap: '0.75rem'}}>
-              <div style={{width: 16, height: 16, border: '1px solid var(--danger)', borderRadius: 3, background: selectedCategories.has(-1) ? 'var(--danger)' : 'transparent'}} />
-              <span>❤️ Favorites</span>
-            </div>
-            <span className="cat-count">{getCategoryCount(-1)}</span>
+            <div className="cat-check fav" />
+            <span>Favorites</span>
+            <span className="cat-count">{catCount(-1)}</span>
           </div>
-
-          {categories.map(cat => {
-            const count = getCategoryCount(cat.id);
-            if (count === 0) return null;
-            return (
-            <div 
-              key={cat.id} 
+          {categories.map((cat) => (
+            <div
+              key={cat.id}
               className={`category-item ${selectedCategories.has(cat.id) ? 'active' : ''}`}
               onClick={() => toggleCategory(cat.id)}
             >
-              <div style={{display: 'flex', alignItems: 'center', gap: '0.75rem'}}>
-                <div style={{width: 16, height: 16, border: '1px solid var(--text-dim)', borderRadius: 3, background: selectedCategories.has(cat.id) ? 'var(--primary)' : 'transparent'}} />
-                <span>{cat.name}</span>
-              </div>
-              <span className="cat-count">{count}</span>
+              <div className="cat-check" />
+              <span>{cat.name}</span>
+              <span className="cat-count">{catCount(cat.id)}</span>
             </div>
-          )})}
+          ))}
+        </div>
+
+        <div className="sidebar-tools">
+          <button className={`tool-btn ${openPanel === 'movers' ? 'active' : ''}`} onClick={() => setOpenPanel(openPanel === 'movers' ? null : 'movers')}>
+            <Activity size={15} /> Movers
+          </button>
+          <button className={`tool-btn ${openPanel === 'heatmap' ? 'active' : ''}`} onClick={() => setOpenPanel(openPanel === 'heatmap' ? null : 'heatmap')}>
+            <BarChart3 size={15} /> Category health
+          </button>
+          <button className={`tool-btn ${showWatch ? 'active' : ''}`} onClick={() => setShowWatch(true)}>
+            <Bell size={15} /> Alerts {watch.length > 0 && <span className="pill-count">{watch.length}</span>}
+          </button>
         </div>
       </aside>
 
       <main className="main-content">
-        <header className="top-header">
-          <div className="filter-group" style={{flex: 1, minWidth: 200, position: 'relative', display: 'flex', alignItems: 'center', background: 'var(--bg-dark)', borderRadius: '6px', border: '1px solid var(--border)', padding: '0 0.5rem'}}>
-            <Search size={18} color="var(--text-dim)" />
-            <input 
-              value={search} onChange={e => setSearch(e.target.value)}
-              list="product-suggestions"
-              placeholder="Search products..." 
-              style={{flex: 1, background: 'transparent', border: 'none', color: 'white', outline: 'none', fontSize: '0.9rem', padding: '0.5rem'}}
-            />
-            <datalist id="product-suggestions">
-                {productNames.map((name, i) => <option key={i} value={name} />)}
-            </datalist>
-            {search && (
-               <X size={16} color="var(--text-dim)" style={{cursor: 'pointer'}} onClick={() => setSearch('')} />
-            )}
-          </div>
+        <Ticker products={products} />
 
-          <div className="filter-group">
-            <span style={{color: 'var(--primary)', fontWeight: 800, fontSize: '0.9rem'}}>
-                {filteredAndSortedProducts.length} <span style={{color: 'var(--text-dim)', fontWeight: 500}}>/ {products.length} Items</span>
+        <div className="overview-bar">
+          <div className="ov-chip">
+            <span className="ov-label">Items tracked</span>
+            <span className="ov-value">{products.length.toLocaleString()}</span>
+          </div>
+          <div className="ov-chip">
+            <span className="ov-label">Categories</span>
+            <span className="ov-value">{categories.length}</span>
+          </div>
+          <div className="ov-chip">
+            <span className="ov-label">Avg move</span>
+            <span className={`ov-value ${overview.avgChange <= 0 ? 'mint' : 'ember'}`}>
+              {overview.avgChange <= 0 ? '▼' : '▲'} {Math.abs(overview.avgChange).toFixed(1)}%
             </span>
           </div>
-
-          <div className="filter-group" style={{marginLeft: 'auto'}}>
-             <button 
-                className={`checkbox-btn ${isCompareMode ? 'active' : ''}`} 
-                onClick={() => { setIsCompareMode(!isCompareMode); setCompareSelected([]); }}
-                style={isCompareMode ? {background: 'var(--warning)', borderColor: 'var(--warning)'} : {}}
-             >
-                <ListPlus size={16}/> Compare Items
-             </button>
+          <div className="ov-chip">
+            <span className="ov-label">At all-time low</span>
+            <span className="ov-value mint">{overview.atLow}</span>
           </div>
-        </header>
+          <div className="ov-chip">
+            <span className="ov-label">Alerts hit</span>
+            <span className={`ov-value ${overview.hitAlerts > 0 ? 'ember' : ''}`}>{overview.hitAlerts}</span>
+          </div>
 
-        <header className="top-header" style={{borderTop: 'none', paddingTop: 0}}>
+          <div className="ov-spacer" />
+
+          <div className="density-group">
+            <span className="ov-label">Density</span>
+            {(['comfortable', 'compact', 'dense'] as Density[]).map((d) => (
+              <button key={d} className={`den-btn ${density === d ? 'active' : ''}`}
+                onClick={() => setDensityPersist(d)} title={d}>
+                {d === 'comfortable' ? 'L' : d === 'compact' ? 'M' : 'H'}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <header className="top-header">
+          <div className="search-box">
+            <Search size={17} />
+            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search products…" />
+            {search && <X size={15} onClick={() => setSearch('')} />}
+          </div>
+
+          <div className="count-chip">
+            {filtered.length.toLocaleString()} <span>/ {products.length.toLocaleString()}</span>
+          </div>
+
           <div className="filter-group">
-            <label>SMART FILTERS:</label>
-            <button className={`smart-filter-btn ${smartFilter === 'all' ? 'active' : ''}`} onClick={() => {setSmartFilter('all'); setSortBy('name');}}>All</button>
-            <button className={`smart-filter-btn ${smartFilter === 'low' ? 'active' : ''}`} onClick={() => {setSmartFilter('low'); setSortBy('change'); setSortOrder('asc');}}>All Time Low</button>
-            <button className={`smart-filter-btn ${smartFilter === 'drop' ? 'active' : ''}`} onClick={() => {setSmartFilter('drop'); setSortBy('change'); setSortOrder('asc');}}>Biggest Drop</button>
-            <button className={`smart-filter-btn ${smartFilter === 'great' ? 'active' : ''}`} onClick={() => setSmartFilter('great')}>Great Deal</button>
-            <button className={`smart-filter-btn ${smartFilter === 'wait' ? 'active' : ''}`} onClick={() => setSmartFilter('wait')}>Wait</button>
-          </div>
-
-          <div className="filter-group" style={{marginLeft: 'auto'}}>
-            <label><SlidersHorizontal size={14}/> UNITS:</label>
-            {['kg', 'ltr', 'piece'].map(unit => (
-              <div key={unit} className={`checkbox-btn ${unitFilters.has(unit) ? 'active' : ''}`} onClick={() => toggleUnit(unit)}>
-                {unit.toUpperCase()}
-              </div>
+            <span className="fg-label">Smart:</span>
+            {(
+              [
+                ['all', 'All'],
+                ['low', 'All-time low'],
+                ['drop', 'Biggest drop'],
+                ['great', 'Great deal'],
+                ['wait', 'Wait'],
+              ] as [SmartFilter, string][]
+            ).map(([k, label]) => (
+              <button key={k} className={`smart-btn ${smartFilter === k ? 'active' : ''}`}
+                onClick={() => { setSmartFilter(k); if (k === 'low') { setSortBy('change'); setSortOrder('asc'); } }}>
+                {label}
+              </button>
             ))}
           </div>
 
           <div className="filter-group">
-            <label><ArrowUpDown size={14}/> SORT:</label>
-            <select className="select-box" value={sortBy} onChange={e => setSortBy(e.target.value as any)}>
+            <span className="fg-label"><SlidersHorizontal size={13} /> Units:</span>
+            {UNIT_TYPES.map((u) => (
+              <button key={u} className={`unit-btn ${unitFilters.has(u) ? 'active' : ''}`}
+                onClick={() => toggleUnit(u)}>
+                {u.toUpperCase()}
+              </button>
+            ))}
+          </div>
+
+          <div className="filter-group">
+            <span className="fg-label"><ArrowUpDown size={13} /> Sort:</span>
+            <select className="select-box" value={sortBy} onChange={(e) => setSortBy(e.target.value as SortKey)}>
               <option value="name">Name</option>
-              <option value="unit_price">Per Unit Price</option>
-              <option value="change">% Change</option>
-              <option value="actual_price">Actual Price</option>
+              <option value="unit_price">Per-unit price</option>
+              <option value="change">% change</option>
+              <option value="actual_price">Pack price</option>
             </select>
-            <button className="checkbox-btn" onClick={() => setSortOrder(o => o === 'asc' ? 'desc' : 'asc')} title="Toggle Sort Order">
-              {sortOrder === 'asc' ? 'ASC' : 'DESC'}
+            <button className="sort-order-btn" onClick={() => setSortOrder((o) => (o === 'asc' ? 'desc' : 'asc'))}>
+              {sortOrder === 'asc' ? '↑' : '↓'}
             </button>
           </div>
+
+          <button
+            className={`mode-btn ${isCompareMode ? 'active' : ''}`}
+            onClick={() => { setIsCompareMode((v) => !v); setCompareIds([]); saveCompare([]); }}
+          >
+            <ListPlus size={15} /> Compare
+          </button>
         </header>
+
+        {openPanel === 'movers' && <div className="panel-zone"><MoversPanel products={products} onSelect={openProduct} /></div>}
+        {openPanel === 'heatmap' && <div className="panel-zone"><CategoryHeatmap categories={categories} products={products} selected={selectedCategories} onToggle={toggleCategory} /></div>}
 
         <div className="product-grid-container">
           <div className="product-grid">
-            {filteredAndSortedProducts.map(product => {
-              const isSelected = compareSelected.some(p => p.id === product.id);
+            {filtered.map((product) => {
+              const isSelected = compareIds.includes(product.id);
+              const target = watchMap.get(product.id);
+              const alertHit = target !== undefined && product.unit_price <= target;
               return (
-              <div 
-                 key={product.id} 
-                 className={`product-card ${isSelected ? 'compare-selected' : ''}`} 
-                 onClick={() => handleProductClick(product)}
-              >
-                {!isCompareMode && (
-                   <button className="fav-btn" onClick={(e) => toggleFavorite(e, product.id)}>
-                     <Heart size={14} fill={product.is_favorite ? "var(--danger)" : "none"} color={product.is_favorite ? "var(--danger)" : "var(--text-dim)"} />
-                   </button>
-                )}
-                {isCompareMode && isSelected && (
-                   <div style={{position: 'absolute', top: 4, right: 4, background: 'var(--warning)', color: '#000', borderRadius: '50%', width: 20, height: 20, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.7rem', fontWeight: 800, zIndex: 2}}>
-                      ✓
-                   </div>
-                )}
-                <div className="product-img-wrapper">
-                  <img src={product.image_url} alt={product.name} className="product-img" loading="lazy" />
-                </div>
-                <div className="product-name" title={product.name}>{product.name}</div>
-                <div className="product-prices">
-                  <div style={{display: 'flex', alignItems: 'baseline', gap: '0.2rem'}}>
-                    <span className="unit-price">{product.unit_price}</span>
-                    <span className="unit-desc">/ {product.unit_type}</span>
+                <div
+                  key={product.id}
+                  className={`product-card ${isSelected ? 'compare-selected' : ''} ${alertHit ? 'alert-hit' : ''}`}
+                  onClick={() => (isCompareMode ? toggleCompareSelect(product) : openProduct(product))}
+                >
+                  {!isCompareMode && (
+                    <button className={`fav-btn ${favs.has(product.id) ? 'on' : ''}`}
+                      onClick={(e) => toggleFav(e, product.id)} aria-label="Favorite">
+                      <Heart size={13} fill={favs.has(product.id) ? 'currentColor' : 'none'} />
+                    </button>
+                  )}
+                  {alertHit && <span className="alert-hit-badge" title="Target price reached">◉</span>}
+                  {isCompareMode && isSelected && <span className="compare-tick">✓</span>}
+
+                  <div className="product-img-wrapper">
+                    <img src={product.image_url} alt={product.name} className="product-img" loading="lazy"
+                      onError={(e) => { (e.currentTarget as HTMLImageElement).src = PLACEHOLDER_IMG; }} />
                   </div>
-                  <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '0.2rem'}}>
-                    <span className="actual-price">Act: {product.actual_price}</span>
-                    {product.change !== 0 && (
-                       <span style={{fontSize: '0.7rem', color: product.change < 0 ? 'var(--success)' : 'var(--danger)', fontWeight: 700}}>
-                          {product.change > 0 ? '+' : ''}{product.change}%
-                       </span>
+                  <div className="product-name" title={product.name}>{product.name}</div>
+
+                  <div className="product-spark">
+                    {product.history && product.history.length >= 2 ? (
+                      <Sparkline points={product.history}
+                        color={product.change <= 0 ? 'var(--mint)' : 'var(--ember)'} />
+                    ) : (
+                      <Sparkline
+                        points={[[0, product.unit_price * 1.02, product.actual_price * 1.02], [1, product.unit_price, product.actual_price]]}
+                        color="var(--dim)" fill={false} width={80} height={16} />
                     )}
                   </div>
+
+                  <div className="product-prices">
+                    <div className="price-line">
+                      <span className="unit-price">{CURRENCY}{fmtPrice(product.unit_price)}</span>
+                      <span className="unit-desc">/{product.unit_type}</span>
+                    </div>
+                    <div className="price-sub">
+                      <span className="actual-price">pack {CURRENCY}{fmtPrice(product.actual_price)}</span>
+                      {product.change !== 0 && (
+                        <span className={`change-tag ${product.change <= 0 ? 'down' : 'up'}`}>
+                          {product.change > 0 ? <TrendingUp size={11} /> : <TrendingDown size={11} />}
+                          {fmtChange(product.change)}
+                        </span>
+                      )}
+                    </div>
+                  </div>
                 </div>
-              </div>
-            )})}
+              );
+            })}
           </div>
+          {filtered.length === 0 && (
+            <div className="empty-state">
+              <Flame size={30} />
+              <p>No items match the current filters.</p>
+              <button onClick={() => { setSelectedCategories(new Set()); setSearch(''); setSmartFilter('all'); setUnitFilters(new Set(UNIT_TYPES)); }}>
+                Reset filters
+              </button>
+            </div>
+          )}
         </div>
       </main>
 
-      {/* Floating Compare Action Bar */}
-      {isCompareMode && compareSelected.length > 0 && (
-         <div className="compare-bar">
-            <span style={{fontWeight: 600}}>Selected {compareSelected.length}/5 items</span>
-            <button 
-              style={{background: 'var(--warning)', border: 'none', padding: '0.5rem 1.5rem', borderRadius: '20px', color: '#000', fontWeight: 800, cursor: 'pointer'}}
-              onClick={launchCompareModal}
-            >
-              COMPARE NOW
-            </button>
-            <button 
-               style={{background: 'transparent', border: '1px solid var(--text-dim)', padding: '0.5rem 1rem', borderRadius: '20px', color: 'var(--text-main)', cursor: 'pointer'}}
-               onClick={() => setCompareSelected([])}
-            >
-              Clear
-            </button>
-         </div>
-      )}
-
-      {/* Single Item History Modal */}
-      {selectedProduct && !showCompareModal && (
-        <div className="modal-overlay" onClick={() => setSelectedProduct(null)}>
-          <div className="modal-content" onClick={e => e.stopPropagation()}>
-            <div className="close-hint" onClick={() => setSelectedProduct(null)}>ESC to close</div>
-            
-            <div className="modal-header">
-              <div>
-                <div className="modal-title">{selectedProduct.name}</div>
-                <div className="modal-subtitle">Pack Size: {selectedProduct.unit} | Tracked per {selectedProduct.unit_type}</div>
-              </div>
-              <div style={{textAlign: 'right', display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.5rem'}}>
-                 {stats && <div className={`suggestion-pill ${stats.sugClass}`}>{stats.suggestion}</div>}
-                 
-                 <div className="date-range-selector">
-                    <button className={dateRange === 7 ? 'active' : ''} onClick={() => setDateRange(7)}>7 Days</button>
-                    <button className={dateRange === 30 ? 'active' : ''} onClick={() => setDateRange(30)}>30 Days</button>
-                    <button className={dateRange === 'all' ? 'active' : ''} onClick={() => setDateRange('all')}>All Time</button>
-                 </div>
-              </div>
-            </div>
-
-            <div className="chart-container">
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={filteredHistoryData} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
-                  <defs>
-                    <linearGradient id="colorUnit" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="var(--success)" stopOpacity={0.4}/>
-                      <stop offset="95%" stopColor="var(--success)" stopOpacity={0}/>
-                    </linearGradient>
-                    <linearGradient id="colorActual" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="var(--primary)" stopOpacity={0.3}/>
-                      <stop offset="95%" stopColor="var(--primary)" stopOpacity={0}/>
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-                  <XAxis dataKey="date" stroke="var(--text-dim)" tick={{fontSize: 12}} tickMargin={10} />
-                  <YAxis yAxisId="left" stroke="var(--success)" tick={{fontSize: 12}} width={60} label={{ value: 'Per Unit Price', angle: -90, position: 'insideLeft', style: { fill: 'var(--success)' } }} />
-                  <YAxis yAxisId="right" orientation="right" stroke="var(--primary)" tick={{fontSize: 12}} width={60} label={{ value: 'Actual Price', angle: 90, position: 'insideRight', style: { fill: 'var(--primary)' } }} />
-                  <Tooltip 
-                    contentStyle={{backgroundColor: 'var(--bg-card)', borderColor: 'var(--border)', borderRadius: '8px'}}
-                    itemStyle={{fontWeight: 700}}
-                  />
-                  <Legend verticalAlign="top" height={36} />
-                  <Area yAxisId="left" type="monotone" dataKey="unit_price" name={`Per ${selectedProduct.unit_type} Price`} stroke="var(--success)" strokeWidth={4} fillOpacity={1} fill="url(#colorUnit)" />
-                  <Area yAxisId="right" type="monotone" dataKey="actual_price" name="Actual Pack Price" stroke="var(--primary)" strokeWidth={2} fillOpacity={1} fill="url(#colorActual)" />
-                </AreaChart>
-              </ResponsiveContainer>
-            </div>
-
-            {stats && (
-              <div className="stats-grid">
-                <div className="stat-box">
-                  <div className="label">Current Unit Price</div>
-                  <div className="value" style={{color: 'var(--success)'}}>{stats.current.toFixed(2)}</div>
-                </div>
-                <div className="stat-box">
-                  <div className="label">Mean / Average</div>
-                  <div className="value">{stats.avg.toFixed(2)}</div>
-                </div>
-                <div className="stat-box">
-                  <div className="label">Period Low</div>
-                  <div className="value" style={{color: 'var(--primary)'}}>{stats.min.toFixed(2)}</div>
-                </div>
-                <div className="stat-box">
-                  <div className="label">Period High</div>
-                  <div className="value" style={{color: 'var(--danger)'}}>{stats.max.toFixed(2)}</div>
-                </div>
-                <div className="stat-box">
-                  <div className="label">Period Change</div>
-                  <div className="value" style={{display: 'flex', alignItems: 'center', gap: '0.2rem', color: stats.change <= 0 ? 'var(--success)' : 'var(--danger)'}}>
-                    {stats.change <= 0 ? <TrendingDown size={20}/> : <TrendingUp size={20}/>}
-                    {Math.abs(stats.change).toFixed(1)}%
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
+      {isCompareMode && compareProducts.length > 0 && (
+        <div className="compare-bar">
+          <span>{compareProducts.length}/5 selected</span>
+          <button className="compare-now" onClick={launchCompare}>COMPARE NOW</button>
+          <button className="compare-clear" onClick={() => { setCompareIds([]); saveCompare([]); }}>Clear</button>
         </div>
       )}
 
-      {/* Multi-Item Compare Modal */}
-      {showCompareModal && (
-         <div className="modal-overlay" onClick={() => setShowCompareModal(false)}>
-         <div className="modal-content" onClick={e => e.stopPropagation()}>
-           <div className="close-hint" onClick={() => setShowCompareModal(false)}>ESC to close</div>
-           
-           <div className="modal-header">
-             <div>
-               <div className="modal-title">Compare Items</div>
-               <div className="modal-subtitle">Tracking multiple items simultaneously (Per Unit Price)</div>
-             </div>
-           </div>
-
-           <div className="chart-container" style={{flex: '0 0 50%'}}>
-             <ResponsiveContainer width="100%" height="100%">
-               <LineChart data={compareHistoryData} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
-                 <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-                 <XAxis dataKey="date" stroke="var(--text-dim)" tick={{fontSize: 12}} tickMargin={10} />
-                 <YAxis stroke="var(--text-dim)" tick={{fontSize: 12}} width={60} />
-                 <Tooltip 
-                   contentStyle={{backgroundColor: 'var(--bg-card)', borderColor: 'var(--border)', borderRadius: '8px'}}
-                   itemStyle={{fontWeight: 700}}
-                 />
-                 <Legend verticalAlign="top" height={36} />
-                 {compareSelected.map((p, idx) => (
-                    <Line 
-                       key={p.id} 
-                       type="monotone" 
-                       dataKey={`price_${p.id}`} 
-                       name={`${p.name} (/ ${p.unit_type})`} 
-                       stroke={COLORS[idx % COLORS.length]} 
-                       strokeWidth={3} 
-                       dot={{r: 3}}
-                    />
-                 ))}
-               </LineChart>
-             </ResponsiveContainer>
-           </div>
-
-           <div className="compare-table">
-               {compareSelected.map((p, idx) => (
-                  <div key={p.id} className="compare-col" style={{borderTop: `4px solid ${COLORS[idx % COLORS.length]}`}}>
-                     <img src={p.image_url} alt={p.name} />
-                     <div style={{fontWeight: 600, fontSize: '0.85rem', lineHeight: 1.2, height: '2.4em', overflow: 'hidden'}}>{p.name}</div>
-                     
-                     <div style={{marginTop: '0.5rem'}}>
-                        <div style={{fontSize: '0.7rem', color: 'var(--text-dim)'}}>Current Price</div>
-                        <div style={{fontSize: '1.2rem', fontWeight: 800, color: 'var(--success)'}}>{p.unit_price} <span style={{fontSize: '0.7rem'}}>/ {p.unit_type}</span></div>
-                     </div>
-                     
-                     <div style={{display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', marginTop: '0.5rem', borderTop: '1px solid var(--border)', paddingTop: '0.5rem'}}>
-                        <span style={{color: 'var(--text-dim)'}}>Avg Price:</span>
-                        <span style={{fontWeight: 700}}>{p.avg_price}</span>
-                     </div>
-                     <div style={{display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem'}}>
-                        <span style={{color: 'var(--text-dim)'}}>All Time Low:</span>
-                        <span style={{fontWeight: 700, color: 'var(--primary)'}}>{p.min_price}</span>
-                     </div>
-                     <div style={{display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem'}}>
-                        <span style={{color: 'var(--text-dim)'}}>Change:</span>
-                        <span style={{fontWeight: 700, color: p.change <= 0 ? 'var(--success)' : 'var(--danger)'}}>
-                           {p.change > 0 ? '+' : ''}{p.change}%
-                        </span>
-                     </div>
-                  </div>
-               ))}
-           </div>
-           
-         </div>
-       </div>
+      {selectedProduct && !showCompare && (
+        <ItemModal
+          product={selectedProduct}
+          history={selectedHistory}
+          isFav={favs.has(selectedProduct.id)}
+          watchTarget={watchMap.get(selectedProduct.id) ?? null}
+          onClose={() => setSelectedProduct(null)}
+          onToggleFav={() => {
+            setFavs((prev) => {
+              const next = new Set(prev);
+              if (next.has(selectedProduct.id)) next.delete(selectedProduct.id);
+              else next.add(selectedProduct.id);
+              saveFavs([...next]);
+              return next;
+            });
+          }}
+          onSaveAlert={(t) => setWatchItem(selectedProduct.id, t)}
+          onRemoveAlert={() => removeWatch(selectedProduct.id)}
+        />
       )}
 
+      {showCompare && (
+        <CompareModal
+          products={compareProducts}
+          histories={compareHistories}
+          onClose={() => setShowCompare(false)}
+          onOpen={openProduct}
+        />
+      )}
+
+      {showWatch && (
+        <WatchlistPanel
+          watch={watch}
+          products={products}
+          onRemove={removeWatch}
+          onSelect={(p) => { setShowWatch(false); openProduct(p); }}
+          onClose={() => setShowWatch(false)}
+        />
+      )}
+
+      {historyLoading && (
+        <div className="history-loading"><Loader2 className="spin" size={16} /> loading price history…</div>
+      )}
     </div>
   );
 }
-
-export default App;

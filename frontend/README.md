@@ -1,73 +1,52 @@
-# React + TypeScript + Vite
+# MEENAtracker — frontend dashboard
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+The MEENAtracker bazaar market terminal. A high-density price-analytics dashboard for
+[Meena Bazar Online](https://meenabazaronline.com) built with React 19, TypeScript, Vite and Recharts.
 
-Currently, two official plugins are available:
+## Data modes
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+The dashboard auto-detects its data source:
 
-## React Compiler
+1. **Live API** — if a FastAPI backend is reachable at `http://localhost:8000`
+   (`VITE_API_BASE` env var overrides it), products and per-item price history are streamed live.
+2. **Static snapshot** — otherwise it falls back to `public/data/meenatracker.json`
+   (a self-contained snapshot exported from the SQLite database), so the same build works
+   fully static on GitHub Pages with zero backend.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+Regenerate the snapshot after a scrape:
 
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+cd backend
+python export_db.py
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## Development
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm install
+npm run dev
 ```
+
+## Production build
+
+```bash
+npm run build   # outputs to dist/ with relative asset paths (GitHub Pages ready)
+npm run lint    # eslint
+npm run preview # serve the built bundle
+```
+
+## GitHub Pages
+
+Pushing to `main` triggers `.github/workflows/deploy.yml`, which builds `dist/` and publishes it
+to the `gh-pages` branch. The site is served at
+`https://<user>.github.io/MEEnaBAzar-analylics/`.
+
+## Features
+
+- Live market tape ticker of today's movers
+- SteamDB-style price-history graphs (7D / 30D / 90D / 6M / 1Y / ALL, per-unit or pack price,
+  all-time-low markers, avg reference line, recent-history table)
+- Market movers panel, category-health heatmap, price-alert watchlist (localStorage)
+- Sparklines on every card, smart filters, multi-select sorting, favorites
+- Compare up to 5 items on one chart
+- Density toggle (comfortable / compact / dense)
