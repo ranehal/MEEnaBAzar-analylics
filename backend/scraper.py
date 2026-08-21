@@ -275,6 +275,14 @@ async def main():
             await page.close()
         await browser.close()
 
+    # Auto-export static database snapshot for GitHub Pages
+    try:
+        from export_db import main as export_static_db
+        print("\nExporting static data snapshot for dashboard...")
+        export_static_db()
+    except Exception as e:
+        print(f"  [WARN] Failed to auto-export database snapshot: {e}")
+
 if __name__ == "__main__":
     ensure_playwright_browser()
     try:
