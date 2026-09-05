@@ -219,13 +219,35 @@ async def save_to_db(category_data, products_data):
                 await session.commit()
                 await session.refresh(db_product)
                 
-            history = PriceHistory(
-                product_id=db_product.id,
-                actual_price=p_data['actual_price'],
-                unit_price=p_data['unit_price'],
-                scraped_at=p_data['scraped_at']
+            # Check most recent price history entry for this product
+            latest_q = await session.execute(
+                select(PriceHistory)
+                .filter_by(product_id=db_product.id)
+                .order_by(PriceHistory.scraped_at.desc())
+                .limit(1)
             )
-            session.add(history)
+            latest_hist = latest_q.scalars().first()
+
+            scrape_date = p_data['scraped_at'].date() if hasattr(p_data['scraped_at'], 'date') else p_data['scraped_at']
+            latest_date = latest_hist.scraped_at.date() if (latest_hist and hasattr(latest_hist.scraped_at, 'date')) else None
+
+            if (
+                latest_hist
+                and latest_date == scrape_date
+                and latest_hist.actual_price == p_data['actual_price']
+                and latest_hist.unit_price == p_data['unit_price']
+            ):
+                # Same day, unchanged price: update timestamp to latest scrape without duplicating rows
+                latest_hist.scraped_at = p_data['scraped_at']
+            else:
+                # New day or price changed: insert a new price history row
+                history = PriceHistory(
+                    product_id=db_product.id,
+                    actual_price=p_data['actual_price'],
+                    unit_price=p_data['unit_price'],
+                    scraped_at=p_data['scraped_at']
+                )
+                session.add(history)
             
         await session.commit()
 

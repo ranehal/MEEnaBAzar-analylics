@@ -17,7 +17,7 @@ OUT_PATH = os.path.join(
     "..", "frontend", "public", "data", "meenatracker.json",
 )
 
-MAX_POINTS = 160
+MAX_POINTS = 365
 HISTORY_CAP_DAYS = 400
 
 
@@ -31,27 +31,23 @@ def epoch_ms(iso: str) -> int:
     return int(dt.timestamp() * 1000)
 
 
-def dedupe_and_cap(points):
-    """points: list of (ts_ms, unit_price, actual_price).
+def daily_aggregate_and_cap(points, max_points=MAX_POINTS):
+    """points: list of (ts_ms, unit_price, actual_price, day_str).
 
-    Collapse consecutive same-price runs but ALWAYS keep the first and the
-    last point so a stable item still renders a full line segment.
+    Preserves DAILY price history so no in-between dates are discarded.
+    For days with multiple scrapes, keeps the latest scrape of that day.
+    Consecutive days with identical prices are FULLY PRESERVED so the
+    user sees an unbroken, continuous daily price history.
     """
     if not points:
         return []
-    out = []
-    first = [points[0][0], round(points[0][1], 2), round(points[0][2], 2)]
-    out.append(first)
-    for ts, unit, actual in points[1:]:
-        if unit != out[-1][1] or actual != out[-1][2]:
-            out.append([ts, round(unit, 2), round(actual, 2)])
-    last = [points[-1][0], round(points[-1][1], 2), round(points[-1][2], 2)]
-    if last != out[-1]:
-        out.append(last)
-    if len(out) > MAX_POINTS:
-        head = out[:1]
-        tail = out[-MAX_POINTS:]
-        out = head + tail if head[0] != tail[0] else tail
+    by_day = {}
+    for ts, unit, actual, day in points:
+        by_day[day] = [ts, round(unit, 2), round(actual, 2)]
+
+    out = [by_day[d] for d in sorted(by_day.keys())]
+    if len(out) > max_points:
+        out = out[-max_points:]
     return out
 
 
@@ -101,7 +97,7 @@ def main():
         "SELECT product_id, scraped_at, unit_price, actual_price "
         "FROM price_history ORDER BY scraped_at"
     ).fetchall():
-        history[pid].append((epoch_ms(ts), unit, actual))
+        history[pid].append((epoch_ms(ts), unit, actual, ts[:10]))
 
     cur.close()
     conn.close()
@@ -114,14 +110,15 @@ def main():
         pts = [pt for pt in history.get(p["id"], []) if pt[0] >= cutoff]
         if not pts:
             continue
-        stats = compute_stats(pts)
+        daily_pts = daily_aggregate_and_cap(pts, max_points=MAX_POINTS)
+        stats = compute_stats(daily_pts)
         p["actual_price"] = stats["actual"]
         p["unit_price"] = stats["unit"]
         p["min_price"] = stats["min"]
         p["max_price"] = stats["max"]
         p["avg_price"] = stats["avg"]
         p["change"] = stats["change"]
-        p["history"] = dedupe_and_cap(pts)
+        p["history"] = daily_pts
         out_products.append(p)
 
     snapshot = {
